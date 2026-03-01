@@ -49,24 +49,6 @@
             <version>${kotlin.version}</version>
         </dependency>
 
-        <!-- Apktool -->
-        <dependency>
-            <groupId>brut.apktool</groupId>
-            <artifactId>apktool-cli</artifactId>
-            <version>2.9.3</version>
-            <scope>system</scope>
-            <systemPath>${project.basedir}/libs/apktool.jar</systemPath>
-        </dependency>
-
-        <!-- Baksmali -->
-        <dependency>
-            <groupId>org.smali</groupId>
-            <artifactId>baksmali</artifactId>
-            <version>3.0.9</version>
-            <scope>system</scope>
-            <systemPath>${project.basedir}/libs/baksmali.jar</systemPath>
-        </dependency>
-
         <!-- Dexlib2 -->
         <dependency>
             <groupId>org.smali</groupId>
