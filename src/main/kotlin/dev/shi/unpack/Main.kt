@@ -34,6 +34,11 @@ object Main {
         val options = createOptions()
         val cmd = DefaultParser().parse(options, args)
 
+        if (cmd.hasOption("h")) {
+            HelpFormatter().printHelp("java -jar unpack-dpt.jar", options)
+            return
+        }
+
         val inputFilePath = cmd.getOptionValue("f") ?: run {
             HelpFormatter().printHelp("java -jar unpack-dpt.jar", options)
             return
@@ -85,6 +90,7 @@ object Main {
 
     private fun createOptions(): Options {
         return Options().apply {
+            addOption("h", "help", false, "Print this help message")
             addOption("f", "file", true, "Path to input APK file")
             addOption("o", "output", true, "Output directory (default: unpacked)")
             addOption("r", "remove-jni-bridge", false, "Remove JNI bridge call from <clinit>")
