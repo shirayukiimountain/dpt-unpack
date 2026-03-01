@@ -17,13 +17,13 @@ This project requires the Android `dx.jar` (Dex parser) as a dependency. This JA
 Before building, run the following command from the project root directory:
 
 ```bash
-mvn install:install-file \\
-  -Dfile=libs/dx.jar \\
-  -DgroupId=com.android \\
-  -DartifactId=dx \\
-  -Dversion=1.0 \\
-  -Dpackaging=jar \\
-  -DgeneratePom=true \\
+mvn install:install-file \
+  -Dfile=libs/dx.jar \
+  -DgroupId=com.android \
+  -DartifactId=dx \
+  -Dversion=1.0 \
+  -Dpackaging=jar \
+  -DgeneratePom=true \
   -DcreateChecksum=true
 ```
 

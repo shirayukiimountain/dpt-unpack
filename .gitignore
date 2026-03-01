@@ -10,9 +10,6 @@ dependency-reduced-pom.xml
 # Tool output
 unpacked/
 
-# Local Libraries
-libs/
-
 # Log files
 *.log
 
