@@ -10,6 +10,23 @@ A command-line tool written in Kotlin designed to statically unpack Android appl
 *   **Optional:** Provides an option to remove the JNI bridge call from the static constructor (`<clinit>`).
 *   **Application Class Identification:** Attempts to identify the app's original `Application` class.
 
+## Local Dependency Setup
+
+This project requires the Android `dx.jar` (Dex parser) as a dependency. This JAR is not available on public Maven repositories and must be installed into your local Maven repository (`~/.m2`).
+
+Before building, run the following command from the project root directory:
+
+```bash
+mvn install:install-file \\
+  -Dfile=libs/dx.jar \\
+  -DgroupId=com.android \\
+  -DartifactId=dx \\
+  -Dversion=1.0 \\
+  -Dpackaging=jar \\
+  -DgeneratePom=true \\
+  -DcreateChecksum=true
+```
+
 ## How to Build
 
 1.  Ensure you have Java (JDK 8 or higher) and Maven installed.
