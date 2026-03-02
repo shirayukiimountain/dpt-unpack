@@ -55,6 +55,7 @@ java -jar target/unpack-dpt.jar -h
 ## Thanks to
 
 · NullRE / NullPointerException - For providing insights into the unpacking workflow of DPT-Shell and explaining how the protector works.
+
 · Android Reverse Engineering Community - For discussions, insights, and shared knowledge that helped in understanding the DPT-Shell protection mechanism.
 
 ## License
