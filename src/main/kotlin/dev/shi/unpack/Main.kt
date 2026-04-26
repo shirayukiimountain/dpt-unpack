@@ -20,6 +20,7 @@ import java.util.zip.ZipInputStream
 object Main {
 
     data class Instruction(val methodIndex: Int, val instructionsData: ByteArray)
+    data class DexCodeOffset(val dexIndex: Int, val offset: Int)
 
     @JvmStatic
     fun main(args: Array<String>) {
@@ -161,30 +162,178 @@ object Main {
         val result = mutableMapOf<Int, List<Instruction>>()
 
         FileInputStream(file).channel.use { channel ->
+            if (channel.size() < 4) {
+                throw EOFException("OoooooOooo is too small: ${channel.size()} bytes")
+            }
+
             val buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size()).order(ByteOrder.LITTLE_ENDIAN)
             val version = buffer.short
-            val dexCount = buffer.short.toInt()
+            val dexCount = buffer.short.toInt() and 0xFFFF
+            val fileSize = buffer.limit()
 
             println("  - Format version: $version")
             println("  - Protected DEX: $dexCount")
 
+            if (version != 2.toShort()) {
+                println("  [WARNING] Unexpected OoooooOooo format version: $version")
+            }
+
+            val indexTableSize = dexCount * 4
+            if (buffer.remaining() < indexTableSize) {
+                throw EOFException(
+                    "OoooooOooo index table is truncated: need $indexTableSize bytes, " +
+                            "remaining ${buffer.remaining()} bytes"
+                )
+            }
+
             val offsets = IntArray(dexCount) { buffer.int }
-
-            offsets.forEachIndexed { index, offset ->
-                buffer.position(offset)
-                val methodCount = buffer.short.toInt() and 0xFFFF
-                val list = List(methodCount) {
-                    val methodIndex = buffer.int
-                    val size = buffer.int
-                    val data = ByteArray(size).apply { buffer.get(this) }
-                    Instruction(methodIndex, data)
+            val validOffsets = offsets.withIndex().mapNotNull { (index, offset) ->
+                when {
+                    offset < 4 + indexTableSize -> {
+                        println("  [WARNING] DEX #$index has invalid offset $offset before data area; skipped.")
+                        null
+                    }
+                    offset + 2 > fileSize -> {
+                        println("  [WARNING] DEX #$index has invalid offset $offset outside file size $fileSize; skipped.")
+                        null
+                    }
+                    else -> DexCodeOffset(index, offset)
                 }
+            }.sortedBy { it.offset }
 
-                result[index] = list
-                println("  - DEX #$index: Found $methodCount method instructions.")
+            validOffsets.forEachIndexed { sortedIndex, dexCodeOffset ->
+                val sectionEnd = validOffsets.getOrNull(sortedIndex + 1)?.offset ?: fileSize
+                val list = parseDexCodeSection(buffer, dexCodeOffset.dexIndex, dexCodeOffset.offset, sectionEnd)
+
+                result[dexCodeOffset.dexIndex] = list
+                println("  - DEX #${dexCodeOffset.dexIndex}: Found ${list.size} method instructions.")
             }
         }
+
+        if (result.isEmpty()) {
+            throw IOException("No valid instruction section found in OoooooOooo")
+        }
+
         return result
+    }
+
+    private fun parseDexCodeSection(buffer: ByteBuffer, dexIndex: Int, offset: Int, sectionEnd: Int): List<Instruction> {
+        val normalLayout = runCatching {
+            parseDexCodeSectionLayout(buffer, dexIndex, offset, sectionEnd, sizeFirst = false)
+        }
+
+        if (normalLayout.isSuccess) {
+            return normalLayout.getOrThrow()
+        }
+
+        val xorEncoded = isLikelyXorEncodedSizeFirstSection(buffer, offset, sectionEnd)
+        val sizeFirstLayout = runCatching {
+            parseDexCodeSectionLayout(buffer, dexIndex, offset, sectionEnd, sizeFirst = true, xorEncoded = xorEncoded)
+        }
+
+        if (sizeFirstLayout.isSuccess) {
+            val encoding = if (xorEncoded) " XOR-encoded" else ""
+            println("  [WARNING] DEX #$dexIndex uses size-first$encoding instruction records; parsed with compatibility mode.")
+            return sizeFirstLayout.getOrThrow()
+        }
+
+        throw IOException(
+            "Unable to parse DEX #$dexIndex instruction section at offset $offset. " +
+                    "methodIndex-first error: ${normalLayout.exceptionOrNull()?.message}; " +
+                    "size-first error: ${sizeFirstLayout.exceptionOrNull()?.message}"
+        )
+    }
+
+    private fun parseDexCodeSectionLayout(
+        buffer: ByteBuffer,
+        dexIndex: Int,
+        offset: Int,
+        sectionEnd: Int,
+        sizeFirst: Boolean,
+        xorEncoded: Boolean = false
+    ): List<Instruction> {
+        val cursor = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        cursor.position(offset)
+
+        if (sectionEnd - offset < 2) {
+            throw EOFException("DEX #$dexIndex section is too small at offset $offset")
+        }
+
+        val methodCount = cursor.short.toInt() and 0xFFFF
+        val list = ArrayList<Instruction>(methodCount)
+
+        repeat(methodCount) { methodOrdinal ->
+            val recordOffset = cursor.position()
+            if (sectionEnd - recordOffset < 8) {
+                throw EOFException(
+                    "DEX #$dexIndex method #$methodOrdinal header is truncated at offset $recordOffset " +
+                            "(section end: $sectionEnd)"
+                )
+            }
+
+            val first = cursor.int
+            val second = cursor.int
+            val methodIndex = if (sizeFirst) second else first
+            val size = if (sizeFirst) first else second
+            val dataOffset = cursor.position()
+
+            if (size < 0) {
+                throw IOException("DEX #$dexIndex method #$methodOrdinal has negative instruction size $size")
+            }
+            if (size > sectionEnd - dataOffset) {
+                throw EOFException(
+                    "DEX #$dexIndex method #$methodOrdinal methodIndex=$methodIndex needs $size instruction bytes " +
+                            "at offset $dataOffset, but section has only ${sectionEnd - dataOffset} bytes left"
+                )
+            }
+
+            val data = ByteArray(size)
+            cursor.get(data)
+            if (xorEncoded) {
+                for (i in data.indices) {
+                    data[i] = (data[i].toInt() xor 0x6f).toByte()
+                }
+            }
+            list.add(Instruction(methodIndex, data))
+        }
+
+        if (cursor.position() < sectionEnd) {
+            val trailing = sectionEnd - cursor.position()
+            println("  [WARNING] DEX #$dexIndex has $trailing trailing bytes in OoooooOooo section.")
+        }
+
+        return list
+    }
+
+    private fun isLikelyXorEncodedSizeFirstSection(buffer: ByteBuffer, offset: Int, sectionEnd: Int): Boolean {
+        val cursor = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        cursor.position(offset)
+
+        if (sectionEnd - offset < 2) return false
+
+        val methodCount = cursor.short.toInt() and 0xFFFF
+        var sampledBytes = 0
+        var markerBytes = 0
+
+        repeat(methodCount) {
+            if (sectionEnd - cursor.position() < 8 || sampledBytes >= 4096) return@repeat
+
+            val size = cursor.int
+            cursor.int
+
+            if (size < 0 || size > sectionEnd - cursor.position()) return false
+
+            val toSample = minOf(size, 4096 - sampledBytes)
+            repeat(toSample) {
+                if ((cursor.get().toInt() and 0xFF) == 0x6f) {
+                    markerBytes++
+                }
+            }
+            sampledBytes += toSample
+            cursor.position(cursor.position() + size - toSample)
+        }
+
+        return sampledBytes >= 16 && markerBytes * 20 >= sampledBytes * 3
     }
 
     private fun patchDexFile(dexFile: File, instructions: List<Instruction>, removeJniBridge: Boolean) {
