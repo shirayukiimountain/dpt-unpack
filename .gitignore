@@ -30,3 +30,6 @@ local.properties
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local reference source
+source-dpt/

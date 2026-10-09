@@ -6,10 +6,11 @@ A command-line tool written in Kotlin designed to statically unpack Android appl
 
 *   **Automatic Extraction:** Automatically extracts the compressed and hidden DEX data from within `classes.dex`.
 *   **Method Body Patching:** Replaces empty or junk method instructions with the correct instructions from the `assets/OoooooOooo` file.
-*   **Compatibility Parser:** Supports the standard DPT-Shell code-item layout and a size-first XOR-encoded variant found in newer/protected samples.
+*   **Automatic Decryption (DPT-Shell v2.20+):** Automatically discovers the `build-key` from native SO files, extracts the `DPT_UNKNOWN_DATA` symbol, derives the AES-256 key via HMAC-SHA256, and decrypts RC4-encrypted method instructions and encrypted shell config `assets/d_shell_data_001`.
+*   **Compatibility Parser:** Supports the standard DPT-Shell code-item layout and a size-first XOR-encoded variant found in older/protected samples.
 *   **DEX Header Correction:** Automatically fixes the SHA-1 and checksum headers on the patched DEX files.
 *   **Optional:** Provides an option to remove the JNI bridge call from the static constructor (`<clinit>`).
-*   **Application Class Identification:** Attempts to identify the app's original `Application` class.
+*   **Application Class Identification:** Automatically extracts the true original `Application` class from decrypted configuration or DEX hierarchy.
 
 ## Local Dependency Setup
 

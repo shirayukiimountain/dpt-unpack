@@ -67,6 +67,9 @@ object Main {
             return
         }
 
+        val manualKey = cmd.getOptionValue("k")
+        val dptConfig = checkAndRecoverConfig(tempApkUnzipDir, manualKey)
+
         println("[PROCESS] Extracting compressed DEX data... ")
         val extractedZipFile = extractZipFromDex(classesDexFile, outputDir)
         println("done.")
@@ -77,16 +80,51 @@ object Main {
         println("done.")
 
         println("\n[PROCESS] Parsing instruction data from OoooooOooo:")
-        val allInstructions = parseOoooooOooo(ooooooOoooFile)
+        val allInstructions = parseOoooooOooo(ooooooOoooFile, dptConfig)
         val removeJniBridge = cmd.hasOption("r")
 
         println("\n[PROCESS] Patching DEX files...")
-        patchDexFiles(hollowedDexDir, allInstructions, removeJniBridge)
+        patchDexFiles(hollowedDexDir, allInstructions, removeJniBridge, dptConfig?.jniClsName)
 
         println("[SUCCESS] Patching completed.")
-        identifyApplicationClass(hollowedDexDir)
+        identifyApplicationClass(hollowedDexDir, dptConfig)
 
         cleanup(extractedZipFile, tempApkUnzipDir)
+    }
+
+    private fun checkAndRecoverConfig(tempApkUnzipDir: File, manualKey: String?): DptConfig? {
+        val configFile = File(tempApkUnzipDir, "assets/d_shell_data_001")
+        if (!configFile.exists()) {
+            println("[INFO] Protection mode: Legacy DPT-Shell (plaintext or XOR-0x6f).")
+            return null
+        }
+
+        println("\n[PROCESS] Detected DPT-Shell encrypted configuration.")
+        val config = DptCrypto.recoverDptConfig(tempApkUnzipDir, manualKey)
+        if (config != null) {
+            val keyHex = config.aesKey.joinToString("") { "%02x".format(it) }
+            println("  - Status            : Key derivation SUCCESS")
+            println("  - AES Crypt Key     : $keyHex")
+            if (config.isRc4Mode) {
+                println("  - Method Protection : RC4 encrypted (v2.20+)")
+            } else {
+                println("  - Method Protection : 4-Byte XOR shifted (v2.10-v2.19) [key=${config.insnsXorKey}]")
+            }
+            if (config.appName.isNotEmpty()) {
+                println("  - Original App Class: ${config.appName}")
+            }
+            if (!config.jniClsName.isNullOrEmpty()) {
+                println("  - JNI Bridge Class  : ${config.jniClsName}")
+            }
+            if (!config.junkClsName.isNullOrEmpty()) {
+                println("  - Junk Code Class   : ${config.junkClsName}")
+            }
+            return config
+        } else {
+            System.err.println("  [WARNING] Failed to auto-recover AES key for DPT-Shell!")
+            System.err.println("  [WARNING] You can specify the key manually with: -k <key>")
+            return null
+        }
     }
 
     private fun createOptions(): Options {
@@ -95,6 +133,7 @@ object Main {
             addOption("f", "file", true, "Path to input APK file")
             addOption("o", "output", true, "Output directory (default: unpacked)")
             addOption("r", "remove-jni-bridge", false, "Remove JNI bridge call from <clinit>")
+            addOption("k", "key", true, "AES-256 key (hex) or build-key to decrypt RC4 instructions")
         }
     }
 
@@ -106,14 +145,19 @@ object Main {
         println("[INFO] Output: ${outputDir.absolutePath}")
     }
 
-    private fun patchDexFiles(hollowedDexDir: File, allInstructions: Map<Int, List<Instruction>>, removeJniBridge: Boolean) {
+    private fun patchDexFiles(
+        hollowedDexDir: File,
+        allInstructions: Map<Int, List<Instruction>>,
+        removeJniBridge: Boolean,
+        jniClsName: String?
+    ) {
         for ((dexIndex, instructions) in allInstructions) {
             val dexName = if (dexIndex == 0) "classes.dex" else "classes${dexIndex + 1}.dex"
             val dexFile = File(hollowedDexDir, dexName)
 
             when {
                 dexFile.exists() && instructions.isNotEmpty() -> {
-                    patchDexFile(dexFile, instructions, removeJniBridge)
+                    patchDexFile(dexFile, instructions, removeJniBridge, jniClsName)
                     println("  > ${dexFile.name} (${instructions.size} methods) ... OK")
                 }
                 dexFile.exists() -> println("  > ${dexFile.name} (no instructions)... skipped")
@@ -122,9 +166,9 @@ object Main {
         }
     }
 
-    private fun identifyApplicationClass(dexDir: File) {
+    private fun identifyApplicationClass(dexDir: File, config: DptConfig?) {
         print("[PROCESS] Identifying Application class... ")
-        val appClass = findApplicationClass(dexDir)
+        val appClass = config?.appName?.takeIf { it.isNotEmpty() } ?: findApplicationClass(dexDir)
         println(if (appClass != null) "found." else "failed.")
         println("\n=============================================")
         println("=======       PROCESS COMPLETED          =======")
@@ -158,7 +202,7 @@ object Main {
         }
     }
 
-    private fun parseOoooooOooo(file: File): Map<Int, List<Instruction>> {
+    private fun parseOoooooOooo(file: File, dptConfig: DptConfig? = null): Map<Int, List<Instruction>> {
         val result = mutableMapOf<Int, List<Instruction>>()
 
         FileInputStream(file).channel.use { channel ->
@@ -203,7 +247,11 @@ object Main {
 
             validOffsets.forEachIndexed { sortedIndex, dexCodeOffset ->
                 val sectionEnd = validOffsets.getOrNull(sortedIndex + 1)?.offset ?: fileSize
-                val list = parseDexCodeSection(buffer, dexCodeOffset.dexIndex, dexCodeOffset.offset, sectionEnd)
+                val list = if (dptConfig != null) {
+                    parseEncryptedDexCodeSection(buffer, dexCodeOffset.dexIndex, dexCodeOffset.offset, sectionEnd, dptConfig)
+                } else {
+                    parseDexCodeSection(buffer, dexCodeOffset.dexIndex, dexCodeOffset.offset, sectionEnd)
+                }
 
                 result[dexCodeOffset.dexIndex] = list
                 println("  - DEX #${dexCodeOffset.dexIndex}: Found ${list.size} method instructions.")
@@ -215,6 +263,63 @@ object Main {
         }
 
         return result
+    }
+
+    private fun parseEncryptedDexCodeSection(
+        buffer: ByteBuffer,
+        dexIndex: Int,
+        offset: Int,
+        sectionEnd: Int,
+        config: DptConfig
+    ): List<Instruction> {
+        val cursor = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        cursor.position(offset)
+
+        if (sectionEnd - offset < 2) {
+            throw EOFException("DEX #$dexIndex section is too small at offset $offset")
+        }
+
+        val methodCount = cursor.short.toInt() and 0xFFFF
+        val list = ArrayList<Instruction>(methodCount)
+
+        repeat(methodCount) { methodOrdinal ->
+            val recordOffset = cursor.position()
+            if (sectionEnd - recordOffset < 8) {
+                throw EOFException(
+                    "DEX #$dexIndex method #$methodOrdinal header is truncated at offset $recordOffset (section end: $sectionEnd)"
+                )
+            }
+
+            val methodIndex = cursor.int
+            val size = cursor.int
+            val dataOffset = cursor.position()
+
+            if (size < 0) {
+                throw IOException("DEX #$dexIndex method #$methodOrdinal has negative instruction size $size")
+            }
+            if (size > sectionEnd - dataOffset) {
+                throw EOFException(
+                    "DEX #$dexIndex method #$methodOrdinal methodIndex=$methodIndex needs $size instruction bytes at offset $dataOffset, but section has only ${sectionEnd - dataOffset} bytes left"
+                )
+            }
+
+            val data = ByteArray(size)
+            cursor.get(data)
+            val plainData = if (config.isRc4Mode) {
+                val rc4Key = DptCrypto.buildInsnsRc4Key(config.aesKey, methodIndex)
+                DptCrypto.rc4Crypt(rc4Key, data)
+            } else {
+                val xorKey = config.insnsXorKey ?: 0
+                for (i in data.indices) {
+                    val shift = (i and 3) shl 3
+                    data[i] = (data[i].toInt() xor ((xorKey ushr shift) and 0xFF)).toByte()
+                }
+                data
+            }
+            list.add(Instruction(methodIndex, plainData))
+        }
+
+        return list
     }
 
     private fun parseDexCodeSection(buffer: ByteBuffer, dexIndex: Int, offset: Int, sectionEnd: Int): List<Instruction> {
@@ -266,8 +371,7 @@ object Main {
             val recordOffset = cursor.position()
             if (sectionEnd - recordOffset < 8) {
                 throw EOFException(
-                    "DEX #$dexIndex method #$methodOrdinal header is truncated at offset $recordOffset " +
-                            "(section end: $sectionEnd)"
+                    "DEX #$dexIndex method #$methodOrdinal header is truncated at offset $recordOffset (section end: $sectionEnd)"
                 )
             }
 
@@ -282,8 +386,7 @@ object Main {
             }
             if (size > sectionEnd - dataOffset) {
                 throw EOFException(
-                    "DEX #$dexIndex method #$methodOrdinal methodIndex=$methodIndex needs $size instruction bytes " +
-                            "at offset $dataOffset, but section has only ${sectionEnd - dataOffset} bytes left"
+                    "DEX #$dexIndex method #$methodOrdinal methodIndex=$methodIndex needs $size instruction bytes at offset $dataOffset, but section has only ${sectionEnd - dataOffset} bytes left"
                 )
             }
 
@@ -336,7 +439,12 @@ object Main {
         return sampledBytes >= 16 && markerBytes * 20 >= sampledBytes * 3
     }
 
-    private fun patchDexFile(dexFile: File, instructions: List<Instruction>, removeJniBridge: Boolean) {
+    private fun patchDexFile(
+        dexFile: File,
+        instructions: List<Instruction>,
+        removeJniBridge: Boolean,
+        jniClsName: String?
+    ) {
         val instructionMap = instructions.associateBy { it.methodIndex }
         val dexBytes = Files.readAllBytes(dexFile.toPath())
         val dex = Dex(dexBytes)
@@ -361,8 +469,7 @@ object Main {
         dexFile.writeBytes(dexBytes)
 
         if (removeJniBridge) {
-            // Remove JNI bridge call from <clinit>
-            DexUtils.removeClinitJniBridgeCall(dexFile)
+            DexUtils.removeClinitJniBridgeCall(dexFile, jniClsName)
         }
     }
 
